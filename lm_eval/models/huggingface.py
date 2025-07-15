@@ -93,6 +93,8 @@ class HFLM(TemplateLM):
         autogptq: Optional[Union[bool, str]] = False,
         gptqmodel: Optional[bool] = False,
         gguf_file: Optional[str] = None,
+        use_assisted_topk: Optional[bool] = False,
+        assistant_ppl_to_k: Optional[List[float]] = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -238,6 +240,13 @@ class HFLM(TemplateLM):
         self.softmax_dtype = (
             get_dtype(softmax_dtype) if softmax_dtype is not None else None
         )
+
+        self.use_assisted_topk = use_assisted_topk
+        if self.use_assisted_topk:
+            eval_logger.info(
+                f"Using assisted top-k sampling with ppl_to_k: {assistant_ppl_to_k}"
+            )
+            self.assistant_ppl_to_k = assistant_ppl_to_k
 
         if str(batch_size).startswith("auto"):
             batch_size = batch_size.split(":")
@@ -882,6 +891,8 @@ class HFLM(TemplateLM):
             A torch tensor of shape [batch, sequence, vocab] with the
         logits returned from the model's decoder
         """
+        print('Warning: _model_call is not adapted with ppl assisted topk. '
+              'Are you evaluating a loglikelihood benchmark?')
         with torch.no_grad():
             if attn_mask is not None or labels is not None:
                 assert attn_mask is not None and labels is not None
@@ -910,6 +921,16 @@ class HFLM(TemplateLM):
 
         if do_sample is False and generation_kwargs.get("temperature") == 0.0:
             generation_kwargs.pop("temperature")
+        
+        if self.use_assisted_topk:
+            generation_kwargs["use_assisted_topk"] = True
+            generation_kwargs["assistant_model"] = self.model
+            generation_kwargs["num_assistant_tokens"] = 4
+            generation_kwargs["num_assistant_tokens_schedule"] = "constant"
+            generation_kwargs["assistant_ppl_to_k"] = self.assistant_ppl_to_k
+
+            assert generation_kwargs["assistant_model"] is not None
+
         # build stopping criteria
         stopping_criteria = stop_sequences_criteria(
             self.tokenizer, stop, context.shape[1], context.shape[0]
