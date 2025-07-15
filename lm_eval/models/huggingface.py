@@ -43,6 +43,33 @@ from lm_eval.models.utils import (
 eval_logger = logging.getLogger(__name__)
 
 
+def _calc_perplexity(logits, token_ids):
+    assert logits.shape[:-1] == token_ids.shape, \
+        f"Logits shape {logits.shape} does not match token_ids shape {token_ids.shape}"
+    loss = F.cross_entropy(logits.view(-1, logits.size(-1)), token_ids.view(-1), reduction='none')
+    perplexity = torch.exp(loss)
+    return perplexity.view(token_ids.shape)
+
+
+def _get_assisted_topks(
+        cfg: list[float] | None,
+        ppls: torch.FloatTensor,
+        k: int
+    ):
+    if cfg is None:
+        cfg = [2.0]
+    if isinstance(cfg, list):
+        ks = torch.full_like(ppls, k, dtype=torch.int64)
+        for i, nk in zip(cfg, range(k)[::-1]):
+            ks[ppls < i] = nk
+        return ks
+    else:
+        raise ValueError(
+            "The `assistant_ppl_to_k` configuration must be a list of floats, "
+            f"but got {cfg} of type {type(cfg)}."
+        )
+
+
 @register_model("hf-auto", "hf", "huggingface")
 class HFLM(TemplateLM):
     """
@@ -891,8 +918,6 @@ class HFLM(TemplateLM):
             A torch tensor of shape [batch, sequence, vocab] with the
         logits returned from the model's decoder
         """
-        print('Warning: _model_call is not adapted with ppl assisted topk. '
-              'Are you evaluating a loglikelihood benchmark?')
         with torch.no_grad():
             if attn_mask is not None or labels is not None:
                 assert attn_mask is not None and labels is not None
@@ -905,7 +930,21 @@ class HFLM(TemplateLM):
                     transformers.AutoModelForCausalLM,
                     transformers.AutoModelForVision2Seq,
                 )
-                return self.model(inps).logits
+                logits = self.model(inps).logits
+                if not self.use_assisted_topk:
+                    # if we are not using assisted top-k sampling, return logits as is
+                    return logits
+
+                # There is 1 offset between the input and output token
+                ppls = _calc_perplexity(logits[:, :-1, :], inps[:, 1:])
+                model_base_k = self.model.config.num_experts_per_tok
+                assert model_base_k is not None and model_base_k > 1, (
+                    "Assisted top-k sampling requires a model with num_experts_per_tok > 1"
+                )
+                topks = torch.full_like(inps, model_base_k)
+                topks[:, -1:] = _get_assisted_topks(self.assistant_ppl_to_k, ppls, model_base_k)
+
+                return self.model(inps, token_top_ks=topks).logits
 
     def _model_generate(self, context, max_length, stop, **generation_kwargs):
         # temperature = 0.0 if not set
