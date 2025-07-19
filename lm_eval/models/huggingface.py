@@ -123,6 +123,7 @@ class HFLM(TemplateLM):
         use_assisted_topk: Optional[bool] = False,
         assistant_ppl_to_k: Optional[List[float]] = None,
         random_shuffle_topk: Optional[bool] = False,
+        assisted_topk_mask_layer_range: Optional[List[int]] = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -272,10 +273,13 @@ class HFLM(TemplateLM):
         self.use_assisted_topk = use_assisted_topk
         if self.use_assisted_topk:
             eval_logger.info(
-                f"Using assisted top-k sampling with ppl_to_k: {assistant_ppl_to_k}"
+                f"Using assisted top-k sampling with ppl_to_k: {assistant_ppl_to_k}\n"
+                f"\trandom_shuffle_topk: {random_shuffle_topk}\n"
+                f"\tassisted_topk_mask_layer_range: {assisted_topk_mask_layer_range}"
             )
             self.assistant_ppl_to_k = assistant_ppl_to_k
             self.random_shuffle_topk = random_shuffle_topk
+            self.assisted_topk_mask_layer_range = assisted_topk_mask_layer_range
 
         if str(batch_size).startswith("auto"):
             batch_size = batch_size.split(":")
@@ -947,6 +951,8 @@ class HFLM(TemplateLM):
                 topks[:, :-1] = _get_assisted_topks(self.assistant_ppl_to_k, ppls, model_base_k)
                 if self.random_shuffle_topk:
                     topks = topks[:, torch.randperm(topks.size(1))]
+                if self.assisted_topk_mask_layer_range is not None:
+                    topks[range(*self.assisted_topk_mask_layer_range)] = model_base_k
 
                 return self.model(inps, token_top_ks=topks).logits
 
