@@ -942,7 +942,7 @@ class HFLM(TemplateLM):
                     "Assisted top-k sampling requires a model with num_experts_per_tok > 1"
                 )
                 topks = torch.full_like(inps, model_base_k)
-                topks[:, -1:] = _get_assisted_topks(self.assistant_ppl_to_k, ppls, model_base_k)
+                topks[:, :-1] = _get_assisted_topks(self.assistant_ppl_to_k, ppls, model_base_k)
 
                 return self.model(inps, token_top_ks=topks).logits
 
