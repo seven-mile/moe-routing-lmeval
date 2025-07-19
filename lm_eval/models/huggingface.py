@@ -122,6 +122,7 @@ class HFLM(TemplateLM):
         gguf_file: Optional[str] = None,
         use_assisted_topk: Optional[bool] = False,
         assistant_ppl_to_k: Optional[List[float]] = None,
+        random_shuffle_topk: Optional[bool] = False,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -274,6 +275,7 @@ class HFLM(TemplateLM):
                 f"Using assisted top-k sampling with ppl_to_k: {assistant_ppl_to_k}"
             )
             self.assistant_ppl_to_k = assistant_ppl_to_k
+            self.random_shuffle_topk = random_shuffle_topk
 
         if str(batch_size).startswith("auto"):
             batch_size = batch_size.split(":")
@@ -943,6 +945,8 @@ class HFLM(TemplateLM):
                 )
                 topks = torch.full_like(inps, model_base_k)
                 topks[:, :-1] = _get_assisted_topks(self.assistant_ppl_to_k, ppls, model_base_k)
+                if self.random_shuffle_topk:
+                    topks = topks[:, torch.randperm(topks.size(1))]
 
                 return self.model(inps, token_top_ks=topks).logits
 
