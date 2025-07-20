@@ -952,6 +952,7 @@ class HFLM(TemplateLM):
                 if self.random_shuffle_topk:
                     topks = topks[:, torch.randperm(topks.size(1))]
                 if self.assisted_topk_mask_layer_range is not None:
+                    topks = topks.unsqueeze(0).repeat(self.model.config.num_hidden_layers, 1, 1)
                     topks[range(*self.assisted_topk_mask_layer_range)] = model_base_k
 
                 return self.model(inps, token_top_ks=topks).logits
