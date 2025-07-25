@@ -122,7 +122,7 @@ class HFLM(TemplateLM):
         gguf_file: Optional[str] = None,
         use_assisted_topk: Optional[bool] = False,
         assistant_ppl_to_k: Optional[List[float]] = None,
-        random_shuffle_topk: Optional[bool] = False,
+        shuffle_topk: Optional[str] = None,
         assisted_topk_mask_layer_range: Optional[List[int]] = None,
         **kwargs,
     ) -> None:
@@ -274,11 +274,11 @@ class HFLM(TemplateLM):
         if self.use_assisted_topk:
             eval_logger.info(
                 f"Using assisted top-k sampling with ppl_to_k: {assistant_ppl_to_k}\n"
-                f"\trandom_shuffle_topk: {random_shuffle_topk}\n"
+                f"\tshuffle_topk: {shuffle_topk}\n"
                 f"\tassisted_topk_mask_layer_range: {assisted_topk_mask_layer_range}"
             )
             self.assistant_ppl_to_k = assistant_ppl_to_k
-            self.random_shuffle_topk = random_shuffle_topk
+            self.shuffle_topk = shuffle_topk
             self.assisted_topk_mask_layer_range = assisted_topk_mask_layer_range
 
         if str(batch_size).startswith("auto"):
@@ -949,8 +949,18 @@ class HFLM(TemplateLM):
                 )
                 topks = torch.full_like(inps, model_base_k)
                 topks[:, :-1] = _get_assisted_topks(self.assistant_ppl_to_k, ppls, model_base_k)
-                if self.random_shuffle_topk:
+                if self.shuffle_topk == 'random':
                     topks = topks[:, torch.randperm(topks.size(1))]
+                elif self.shuffle_topk == 'reversed':
+                    perm = torch.argsort(ppls)
+                    # Note that ppls does not contain the last token. But it
+                    # works well on the gather/scatter, by leaving the last
+                    # token unchanged.
+                    rev_perm = perm.flip(-1)
+                    sorted_topks = topks.gather(dim=-1, index=perm)
+                    topks.scatter_(dim=-1, index=rev_perm, src=sorted_topks)
+                else:
+                    assert self.shuffle_topk is None
                 if self.assisted_topk_mask_layer_range is not None:
                     topks = topks.unsqueeze(0).repeat(self.model.config.num_hidden_layers, 1, 1)
                     topks[range(*self.assisted_topk_mask_layer_range)] = model_base_k
