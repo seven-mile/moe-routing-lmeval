@@ -124,6 +124,7 @@ class HFLM(TemplateLM):
         assistant_ppl_to_k: Optional[List[float]] = None,
         shuffle_topk: Optional[str] = None,
         assisted_topk_mask_layer_range: Optional[List[int]] = None,
+        topk_assistant_model: Optional[str] = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -275,11 +276,16 @@ class HFLM(TemplateLM):
             eval_logger.info(
                 f"Using assisted top-k sampling with ppl_to_k: {assistant_ppl_to_k}\n"
                 f"\tshuffle_topk: {shuffle_topk}\n"
-                f"\tassisted_topk_mask_layer_range: {assisted_topk_mask_layer_range}"
+                f"\tassisted_topk_mask_layer_range: {assisted_topk_mask_layer_range}\n"
+                f"\ttopk_assistant_model: {topk_assistant_model or 'self'}\n"
             )
             self.assistant_ppl_to_k = assistant_ppl_to_k
             self.shuffle_topk = shuffle_topk
             self.assisted_topk_mask_layer_range = assisted_topk_mask_layer_range
+            if topk_assistant_model is not None:
+                self.topk_assistant_model = self._load_assistant_model(topk_assistant_model)
+            else:
+                self.topk_assistant_model = self.model
 
         if str(batch_size).startswith("auto"):
             batch_size = batch_size.split(":")
@@ -342,6 +348,21 @@ class HFLM(TemplateLM):
             eval_logger.info(
                 f"Loglikelihood prefix token id used in evaluation: {self.prefix_token_id}"
             )
+
+    def _load_assistant_model(self, model_path: str):
+        from transformers import AutoModelForCausalLM
+        assist_model = AutoModelForCausalLM.from_pretrained(model_path, device_map='auto', torch_dtype='auto', attn_implementation="flash_attention_2")
+        # The draft model should use the same tokenizer as the target model.
+        assert self.tokenizer is not None, "Tokenizer not yet initialized."
+        # Set proper generation config
+        assist_model.generation_config.pad_token_id = self.tokenizer.eos_token_id
+        assist_model.generation_config.do_sample = False
+        assist_model.generation_config.temperature = None
+        assist_model.generation_config.top_p = None
+        assist_model.generation_config.top_k = None
+        assist_model.eval()
+
+        return assist_model
 
     def _get_accelerate_args(
         self,
@@ -936,10 +957,12 @@ class HFLM(TemplateLM):
                     transformers.AutoModelForCausalLM,
                     transformers.AutoModelForVision2Seq,
                 )
-                logits = self.model(inps).logits
                 if not self.use_assisted_topk:
                     # if we are not using assisted top-k sampling, return logits as is
+                    logits = self.model(inps).logits
                     return logits
+
+                logits = self.topk_assistant_model(inps).logits
 
                 # There is 1 offset between the input and output token
                 ppls = _calc_perplexity(logits[:, :-1, :], inps[:, 1:])
@@ -984,7 +1007,7 @@ class HFLM(TemplateLM):
         
         if self.use_assisted_topk:
             generation_kwargs["use_assisted_topk"] = True
-            generation_kwargs["assistant_model"] = self.model
+            generation_kwargs["assistant_model"] = self.topk_assistant_model
             generation_kwargs["num_assistant_tokens"] = 4
             generation_kwargs["num_assistant_tokens_schedule"] = "constant"
             generation_kwargs["assistant_ppl_to_k"] = self.assistant_ppl_to_k
