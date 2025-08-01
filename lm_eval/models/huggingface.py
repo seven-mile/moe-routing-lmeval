@@ -1011,6 +1011,9 @@ class HFLM(TemplateLM):
             generation_kwargs["num_assistant_tokens"] = 4
             generation_kwargs["num_assistant_tokens_schedule"] = "constant"
             generation_kwargs["assistant_ppl_to_k"] = self.assistant_ppl_to_k
+            assert self.shuffle_topk is None, "shuffle_topk is not supported for generate_util yet"
+            if self.assisted_topk_mask_layer_range is not None:
+                generation_kwargs["assisted_topk_mask_layer_range"] = self.assisted_topk_mask_layer_range
 
             assert generation_kwargs["assistant_model"] is not None
 
