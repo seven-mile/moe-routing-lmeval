@@ -749,6 +749,14 @@ def evaluate(
         if log_samples:
             results_dict["samples"] = dict(samples)
 
+        if isinstance(lm, lm_eval.models.huggingface.HFLM):
+            if hasattr(lm, "assisted_stat_ksum") and hasattr(lm, "assisted_stat_kcnt"):
+                results_dict["assisted_stat"] = {
+                    "ksum": lm.assisted_stat_ksum,
+                    "kcnt": lm.assisted_stat_kcnt,
+                    "benefit": lm.assisted_stat_ksum / lm.assisted_stat_kcnt / 8,
+                }
+
         return results_dict
 
     else:

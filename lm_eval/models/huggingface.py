@@ -39,6 +39,55 @@ from lm_eval.models.utils import (
     stop_sequences_criteria,
 )
 
+import inspect
+import importlib.util
+
+def load_action_from_config(config_string: str):
+    """
+    根据 "文件路径:函数名" 格式的字符串，动态加载并返回函数。
+
+    :param config_string: 形如 "/path/to/my_actions.py:test1" 的配置字符串
+    :return: 加载到的函数对象，如果失败则返回 None
+    """
+    try:
+        path_str, func_name = config_string.rsplit(':', 1)
+    except ValueError:
+        print(f"错误: 配置字符串 '{config_string}' 格式不正确。期望格式为 '路径:函数名'。")
+        return None
+
+    if not os.path.exists(path_str):
+        print(f"错误: 文件路径不存在 '{path_str}'")
+        return None
+
+    try:
+        # 1. 从文件路径创建模块规范 (Module Spec)
+        # 第一个参数是模块名，可以任意取，通常用文件名（不含.py）
+        module_name = os.path.splitext(os.path.basename(path_str))[0]
+        spec = importlib.util.spec_from_file_location(module_name, path_str)
+
+        if spec is None:
+            print(f"错误: 无法从 '{path_str}' 加载模块规范。")
+            return None
+
+        # 2. 根据规范创建模块对象
+        action_module = importlib.util.module_from_spec(spec)
+        
+        # 3. 执行模块代码，将其内容加载到模块对象中
+        spec.loader.exec_module(action_module)
+
+        # 4. 从加载的模块中获取函数
+        action_function = getattr(action_module, func_name)
+        
+        print(f"成功加载函数 '{func_name}' 从 '{path_str}'")
+        return action_function
+
+    except AttributeError:
+        print(f"错误: 在文件 '{path_str}' 中找不到函数 '{func_name}'。")
+        return None
+    except Exception as e:
+        print(f"加载时发生未知错误: {e}")
+        return None
+
 
 eval_logger = logging.getLogger(__name__)
 
@@ -49,25 +98,6 @@ def _calc_perplexity(logits, token_ids):
     loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), token_ids.reshape(-1), reduction='none')
     perplexity = torch.exp(loss)
     return perplexity.view(token_ids.shape)
-
-
-def _get_assisted_topks(
-        cfg: list[float] | None,
-        ppls: torch.FloatTensor,
-        k: int
-    ):
-    if cfg is None:
-        cfg = [2.0]
-    if isinstance(cfg, list):
-        ks = torch.full_like(ppls, k, dtype=torch.int64)
-        for i, nk in zip(cfg, range(k)[::-1]):
-            ks[ppls < i] = nk
-        return ks
-    else:
-        raise ValueError(
-            "The `assistant_ppl_to_k` configuration must be a list of floats, "
-            f"but got {cfg} of type {type(cfg)}."
-        )
 
 
 @register_model("hf-auto", "hf", "huggingface")
@@ -121,9 +151,7 @@ class HFLM(TemplateLM):
         gptqmodel: Optional[bool] = False,
         gguf_file: Optional[str] = None,
         use_assisted_topk: Optional[bool] = False,
-        assistant_ppl_to_k: Optional[List[float]] = None,
-        shuffle_topk: Optional[str] = None,
-        assisted_topk_mask_layer_range: Optional[List[int]] = None,
+        assisted_action: Optional[str] = None,
         topk_assistant_model: Optional[str] = None,
         **kwargs,
     ) -> None:
@@ -273,15 +301,23 @@ class HFLM(TemplateLM):
 
         self.use_assisted_topk = use_assisted_topk
         if self.use_assisted_topk:
+            assert assisted_action is not None, "assisted_action must be set"
+            user_defined_assisted_action = load_action_from_config(assisted_action)
             eval_logger.info(
-                f"Using assisted top-k sampling with ppl_to_k: {assistant_ppl_to_k}\n"
-                f"\tshuffle_topk: {shuffle_topk}\n"
-                f"\tassisted_topk_mask_layer_range: {assisted_topk_mask_layer_range}\n"
+                f"Using assisted top-k sampling with:\n"
                 f"\ttopk_assistant_model: {topk_assistant_model or 'self'}\n"
+                f"{inspect.getsource(user_defined_assisted_action)}"
             )
-            self.assistant_ppl_to_k = assistant_ppl_to_k
-            self.shuffle_topk = shuffle_topk
-            self.assisted_topk_mask_layer_range = assisted_topk_mask_layer_range
+
+            self.assisted_stat_ksum = 0
+            self.assisted_stat_kcnt = 0
+            def action_hook(ppls, config):
+                ks = user_defined_assisted_action(ppls, config)
+                self.assisted_stat_ksum += ks.sum().item()
+                self.assisted_stat_kcnt += ks.numel()
+                return ks
+
+            self.dyn_assisted_action = action_hook
             if topk_assistant_model is not None:
                 self.topk_assistant_model = self._load_assistant_model(topk_assistant_model)
             else:
@@ -971,22 +1007,8 @@ class HFLM(TemplateLM):
                     "Assisted top-k sampling requires a model with num_experts_per_tok > 1"
                 )
                 topks = torch.full_like(inps, model_base_k)
-                topks[:, :-1] = _get_assisted_topks(self.assistant_ppl_to_k, ppls, model_base_k)
-                if self.shuffle_topk == 'random':
-                    topks = topks[:, torch.randperm(topks.size(1))]
-                elif self.shuffle_topk == 'reversed':
-                    perm = torch.argsort(ppls)
-                    # Note that ppls does not contain the last token. But it
-                    # works well on the gather/scatter, by leaving the last
-                    # token unchanged.
-                    rev_perm = perm.flip(-1)
-                    sorted_topks = topks.gather(dim=-1, index=perm)
-                    topks.scatter_(dim=-1, index=rev_perm, src=sorted_topks)
-                else:
-                    assert self.shuffle_topk is None
-                if self.assisted_topk_mask_layer_range is not None:
-                    topks = topks.unsqueeze(0).repeat(self.model.config.num_hidden_layers, 1, 1)
-                    topks[range(*self.assisted_topk_mask_layer_range)] = model_base_k
+                topks = topks.unsqueeze(0).repeat(self.model.config.num_hidden_layers, 1, 1)
+                topks[:, :, :-1] = self.dyn_assisted_action(ppls, self.model.config)
 
                 return self.model(inps, token_top_ks=topks).logits
 
@@ -1010,10 +1032,7 @@ class HFLM(TemplateLM):
             generation_kwargs["assistant_model"] = self.topk_assistant_model
             generation_kwargs["num_assistant_tokens"] = 4
             generation_kwargs["num_assistant_tokens_schedule"] = "constant"
-            generation_kwargs["assistant_ppl_to_k"] = self.assistant_ppl_to_k
-            assert self.shuffle_topk is None, "shuffle_topk is not supported for generate_util yet"
-            if self.assisted_topk_mask_layer_range is not None:
-                generation_kwargs["assisted_topk_mask_layer_range"] = self.assisted_topk_mask_layer_range
+            generation_kwargs["assisted_action"] = self.dyn_assisted_action
 
             assert generation_kwargs["assistant_model"] is not None
 
