@@ -136,6 +136,7 @@ class TemplateAPI(TemplateLM):
         # timeout in seconds
         timeout: int = 300,
         max_images: int = 1,
+        assisted_action: Optional[dict[str, Any]] = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -183,6 +184,7 @@ class TemplateAPI(TemplateLM):
         self._eos_string = eos_string
         self.timeout = int(timeout)
         self.max_images = int(max_images)
+        self.assisted_action = assisted_action
 
         eval_logger.info(f"Using tokenizer {self.tokenizer_backend}")
         if self.tokenizer_backend is None:
@@ -418,6 +420,10 @@ class TemplateAPI(TemplateLM):
     ) -> Optional[dict]:
         # !!! Copy: shared dict for each request, need new object !!!
         gen_kwargs = copy.deepcopy(gen_kwargs)
+        if self.assisted_action is not None:
+            gen_kwargs |= {
+                "dyn_assisted_action_config": self.assisted_action
+            }
         try:
             response = requests.post(
                 self.base_url,
@@ -457,6 +463,10 @@ class TemplateAPI(TemplateLM):
     ) -> Union[List[str], List[Tuple[float, bool]], None]:
         # !!! Copy: shared dict for each request, need new object !!!
         gen_kwargs = copy.deepcopy(gen_kwargs)
+        if self.assisted_action is not None:
+            gen_kwargs |= {
+                "dyn_assisted_action_config": self.assisted_action
+            }
         payload = self._create_payload(
             self.create_message(messages),
             generate=generate,
