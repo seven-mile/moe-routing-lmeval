@@ -93,6 +93,7 @@ eval_logger = logging.getLogger(__name__)
 
 
 def _calc_perplexity(logits, token_ids):
+    logits = logits.float()
     assert logits.shape[:-1] == token_ids.shape, \
         f"Logits shape {logits.shape} does not match token_ids shape {token_ids.shape}"
     loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), token_ids.reshape(-1), reduction='none')
