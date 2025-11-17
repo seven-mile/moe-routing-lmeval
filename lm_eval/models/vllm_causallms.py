@@ -30,6 +30,7 @@ from lm_eval.utils import (
 
 
 try:
+    raise ModuleNotFoundError
     import ray
     from vllm import LLM, SamplingParams
     from vllm.lora.request import LoRARequest

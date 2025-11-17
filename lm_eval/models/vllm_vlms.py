@@ -22,6 +22,7 @@ eval_logger = logging.getLogger(__name__)
 
 
 try:
+    raise ModuleNotFoundError
     import ray
     from vllm import LLM, SamplingParams
     from vllm.lora.request import LoRARequest  # noqa: F401
