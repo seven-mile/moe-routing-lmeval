@@ -414,6 +414,7 @@ class TemplateAPI(TemplateLM):
         self,
         messages: Union[List[List[int]], List[str], List[JsonChatStr]],
         *,
+        instances: Union[List[Instance], Instance, None] = None,
         generate: bool = True,
         gen_kwargs: Optional[Dict] = None,
         **kwargs,
@@ -443,7 +444,23 @@ class TemplateAPI(TemplateLM):
                     f"API request failed with error message: {response.text}. Retrying..."
                 )
             response.raise_for_status()
-            return response.json()
+            results = response.json()
+
+            # Collect top_ks.
+            if instances is not None:
+                if not isinstance(instances, list):
+                    instances = [instances]
+                if not isinstance(results, list):
+                    topk_results = [results]
+                else:
+                    topk_results = results
+                assert len(instances) == len(
+                    topk_results
+                ), "Number of instances must match number of results"
+                for instance, output in zip(instances, topk_results):
+                    instance.topks = output["choices"][0].get("token_top_ks", None)
+
+            return results
         except RetryError:
             eval_logger.error(
                 "API request failed after multiple retries. Please check the API status."
@@ -455,6 +472,7 @@ class TemplateAPI(TemplateLM):
         session: ClientSession,
         messages: Union[List[List[int]], List[str], List[JsonChatStr]],
         *,
+        instances: Union[List[Instance], Instance, None] = None,
         generate: bool = True,
         cache_keys: list = None,
         ctxlens: Optional[List[int]] = None,
@@ -500,6 +518,19 @@ class TemplateAPI(TemplateLM):
                     ctxlens=ctxlens,
                 )
             )
+            if instances is not None:
+                if not isinstance(instances, list):
+                    instances = [instances]
+                if not isinstance(outputs, list):
+                    topk_outputs = [outputs]
+                else:
+                    topk_outputs = outputs
+                assert len(instances) == len(
+                    answers
+                ), "Number of instances must match number of answers"
+                for instance, output in zip(instances, topk_outputs):
+                    assert generate, "top_k only supported for generation tasks"
+                    instance.topks = output["choices"][0].get("token_top_ks", None)
             if cache_keys:
                 for res, cache in zip(answers, cache_keys):
                     self.cache_hook.add_partial(cache_method, cache, res)
@@ -539,6 +570,7 @@ class TemplateAPI(TemplateLM):
         requests: list,
         cache_keys: list,
         *,
+        instances: Optional[List[Instance]] = None,
         generate: bool = True,
         ctxlens: List[int] = None,
         **kwargs,
@@ -554,21 +586,24 @@ class TemplateAPI(TemplateLM):
                 reraise=True,
             )(self.amodel_call)
             # Create tasks for each batch of request
+            assert instances is not None, "NYI"
             tasks = [
                 asyncio.create_task(
                     retry_(
                         session=session,
                         messages=message,
                         cache_keys=cache_key,
+                        instances=instance,
                         generate=generate,
                         ctxlens=ctxlen,
                         **kwargs,
                     )
                 )
-                for message, cache_key, ctxlen in zip(
+                for message, cache_key, ctxlen, instance in zip(
                     chunks(requests, n=self._batch_size),
                     chunks(cache_keys, n=self._batch_size),
                     chunks(ctxlens, n=self._batch_size),
+                    chunks(instances, n=self._batch_size),
                 )
             ]
 
@@ -641,6 +676,7 @@ class TemplateAPI(TemplateLM):
         self, requests: List[Instance], disable_tqdm: bool = False
     ) -> List[str]:
         res = []
+        instances = requests
 
         def _collate_gen(_requests):
             # sort by the length of the non-tokenized contexts
@@ -675,8 +711,9 @@ class TemplateAPI(TemplateLM):
             )
         else:
             encodings_list = [None] * len(requests)
+        assert len(instances) == len(requests), "Mismatch in number of requests"
         requests = [
-            (a, b, c) for a, b, c in zip(requests, all_gen_kwargs, encodings_list)
+            (a, b, c, d) for a, b, c, d in zip(requests, all_gen_kwargs, encodings_list, instances)
         ]
 
         re_ord = Collator(
@@ -694,7 +731,7 @@ class TemplateAPI(TemplateLM):
         if self._concurrent <= 1:
             pbar = tqdm(desc="Requesting API", total=len(requests))
             for chunk in chunked:
-                contexts, all_gen_kwargs, encodings_list = zip(*chunk)
+                contexts, all_gen_kwargs, encodings_list, instances = zip(*chunk)
                 if self.tokenized_requests:
                     max_gen_toks = all_gen_kwargs[0].get(
                         "max_gen_toks", self._max_gen_toks
@@ -717,6 +754,7 @@ class TemplateAPI(TemplateLM):
                     reraise=True,
                 )(self.model_call)(
                     messages=req,
+                    instances=instances,
                     generate=True,
                     gen_kwargs=copy.deepcopy(all_gen_kwargs[0]),
                 )
@@ -740,7 +778,7 @@ class TemplateAPI(TemplateLM):
                             pbar.update(1)
         else:
             for chunk in chunked:
-                contexts, all_gen_kwargs, encodings_list = zip(*chunk)
+                contexts, all_gen_kwargs, encodings_list, instances = zip(*chunk)
                 if self.tokenized_requests:
                     max_gen_toks = all_gen_kwargs[0].get(
                         "max_gen_toks", self._max_gen_toks
@@ -762,6 +800,7 @@ class TemplateAPI(TemplateLM):
                         self.get_batched_requests(
                             req,
                             cache_keys=[(ctx, all_gen_kwargs[0]) for ctx in contexts],
+                            instances=instances,
                             generate=True,
                             gen_kwargs=copy.deepcopy(all_gen_kwargs[0]),
                         )

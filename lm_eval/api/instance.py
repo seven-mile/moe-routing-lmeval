@@ -19,6 +19,8 @@ class Instance:
     resps: list = field(default_factory=list)
     filtered_resps: dict = field(default_factory=dict)
 
+    topks: Optional[list[list[int]]] = None
+
     # initialized after init
     task_name: Optional[str] = None
     doc_id: Optional[int] = None

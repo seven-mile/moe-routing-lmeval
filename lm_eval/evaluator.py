@@ -553,6 +553,8 @@ def evaluate(
             # todo: may not account for padding in cases like SquadV2 which has multiple req types
             padding_requests[reqtype] += numpad
 
+    req_topks: list[float] = []
+
     ### Run LM on inputs, get all outputs ###
     # execute each type of request
     for reqtype, reqs in requests.items():
@@ -568,6 +570,16 @@ def evaluate(
 
         # run requests through model
         resps = getattr(lm, reqtype)(cloned_reqs)
+
+        for req in cloned_reqs:
+            assert isinstance(req, lm_eval.api.task.Instance)
+            if req.topks and (cnt_ks := sum(
+                len(resp) for resp in req.topks
+            )):
+                sum_ks = sum(
+                    k for ks in req.topks for k in ks
+                )
+                req_topks.append((sum_ks, cnt_ks))
 
         # put responses from model into a list of length K for each request.
         for x, req in zip(resps, cloned_reqs):
@@ -627,6 +639,7 @@ def evaluate(
                         "filtered_resps": [
                             req.filtered_resps[filter_key] for req in requests
                         ],
+                        "topks": [req.topks for req in requests],
                         "filter": filter_key,
                         "metrics": list(metrics.keys()),
                         "doc_hash": hash_string(
@@ -723,8 +736,28 @@ def evaluate(
                             _higher_is_better[m] = None
                 higher_is_better[group] = _higher_is_better
 
+        # Calc some about topks.
+        req_mean_topk = [k_sum / k_cnt for k_sum, k_cnt in req_topks] if len(req_topks) > 0 else []
+
+        mean_req_topk = np.mean(req_mean_topk or 0)
+        median_req_topk = np.median(req_mean_topk or 0)
+        std_req_topk = np.std(req_mean_topk or 0)
+        p95_req_topk = np.percentile(req_mean_topk or 0, 95)
+        p99_req_topk = np.percentile(req_mean_topk or 0, 99)
+
+        # Global mean over all topks and counts.
+        mean_topk = sum(k_sum for k_sum, _ in req_topks) / sum(k_cnt for _, k_cnt in req_topks) if len(req_topks) > 0 else 0
+
         results_dict = {
             "results": dict(results_agg.items()),
+            "topk": {
+                "mean_topk": mean_topk,
+                "mean_req_topk": mean_req_topk,
+                "median_req_topk": median_req_topk,
+                "std_req_topk": std_req_topk,
+                "p95_req_topk": p95_req_topk,
+                "p99_req_topk": p99_req_topk,
+            },
             **(
                 {"groups": dict(group_agg.items())}
                 if (bool(group_agg) & show_group_table)
