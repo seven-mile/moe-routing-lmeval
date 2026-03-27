@@ -137,6 +137,7 @@ class TemplateAPI(TemplateLM):
         timeout: int = 300,
         max_images: int = 1,
         assisted_action: Optional[dict[str, Any]] = None,
+        enable_thinking: bool = True,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -185,6 +186,7 @@ class TemplateAPI(TemplateLM):
         self.timeout = int(timeout)
         self.max_images = int(max_images)
         self.assisted_action = assisted_action
+        self.enable_thinking = enable_thinking
 
         eval_logger.info(f"Using tokenizer {self.tokenizer_backend}")
         if self.tokenizer_backend is None:
@@ -313,12 +315,18 @@ class TemplateAPI(TemplateLM):
     ) -> Union[str, JsonChatStr]:
         """Applies a chat template to a list of chat history between user and model."""
         if self.tokenizer_backend == "huggingface" and self.tokenized_requests:
-            return self.tokenizer.apply_chat_template(
+            kwargs = {}
+            if not self.enable_thinking:
+                kwargs["enable_thinking"] = False
+            
+            res = self.tokenizer.apply_chat_template(
                 chat_history,
                 tokenize=False,
                 add_generation_prompt=add_generation_prompt,
                 continue_final_message=not add_generation_prompt,
+                **kwargs,
             )
+            return res
         else:
             # bit of a hack. We'll load back before sending to the API
             return JsonChatStr(
@@ -425,17 +433,20 @@ class TemplateAPI(TemplateLM):
             gen_kwargs |= {
                 "dyn_assisted_action_config": self.assisted_action
             }
+        if not self.enable_thinking:
+            gen_kwargs.setdefault("chat_template_kwargs", {})["enable_thinking"] = False
         try:
+            payload = self._create_payload(
+                self.create_message(messages),
+                generate=generate,
+                gen_kwargs=gen_kwargs,
+                seed=self._seed,
+                eos=self.eos_string,
+                **kwargs,
+            )
             response = requests.post(
                 self.base_url,
-                json=self._create_payload(
-                    self.create_message(messages),
-                    generate=generate,
-                    gen_kwargs=gen_kwargs,
-                    seed=self._seed,
-                    eos=self.eos_string,
-                    **kwargs,
-                ),
+                json=payload,
                 headers=self.header,
                 verify=self.verify_certificate,
             )
@@ -485,6 +496,8 @@ class TemplateAPI(TemplateLM):
             gen_kwargs |= {
                 "dyn_assisted_action_config": self.assisted_action
             }
+        if not self.enable_thinking:
+            gen_kwargs.setdefault("chat_template_kwargs", {})["enable_thinking"] = False
         payload = self._create_payload(
             self.create_message(messages),
             generate=generate,
