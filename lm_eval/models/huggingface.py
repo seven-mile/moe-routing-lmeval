@@ -990,10 +990,10 @@ class HFLM(TemplateLM):
                     input_ids=inps, attention_mask=attn_mask, labels=labels
                 ).logits
             else:
-                assert self.AUTO_MODEL_CLASS in (
-                    transformers.AutoModelForCausalLM,
-                    transformers.AutoModelForVision2Seq,
-                )
+                # assert self.AUTO_MODEL_CLASS in (
+                #     transformers.AutoModelForCausalLM,
+                #     transformers.AutoModelForVision2Seq,
+                # )
                 if not self.use_assisted_topk:
                     # if we are not using assisted top-k sampling, return logits as is
                     logits = self.model(inps).logits
