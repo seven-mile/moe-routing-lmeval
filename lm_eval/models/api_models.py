@@ -459,6 +459,8 @@ class TemplateAPI(TemplateLM):
 
             # Collect top_ks.
             if instances is not None:
+                if isinstance(instances, tuple):
+                    instances = list(instances)
                 if not isinstance(instances, list):
                     instances = [instances]
                 if not isinstance(results, list):
